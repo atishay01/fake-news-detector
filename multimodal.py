@@ -432,12 +432,22 @@ def fuse_signals(
     signals: list,
     weights: Optional[dict] = None,
     uncertain_band: tuple = (0.40, 0.60),
+    disagreement_threshold: float = 0.5,
 ) -> FusedVerdict:
     """Weighted late fusion across whichever modalities are present.
 
     A signal with confidence=0 is dropped and its weight is redistributed
     proportionally. The fused probability is the confidence-weighted average
     of per-modality REAL-scores.
+
+    **Disagreement override:** if the spread between the highest and lowest
+    active modality scores exceeds ``disagreement_threshold`` (default 0.5),
+    the verdict is forced to UNCERTAIN regardless of the weighted average.
+    This catches the out-of-distribution failure mode where one classifier
+    is confidently wrong (e.g. the RoBERTa text model collapsing to 100%
+    FAKE on entertainment/box-office news) while another modality correctly
+    says otherwise. A well-calibrated multimodal system should admit
+    uncertainty here, not rubber-stamp the majority-weighted signal.
     """
     weights = dict(weights or DEFAULT_WEIGHTS)
 
@@ -470,6 +480,20 @@ def fuse_signals(
     coverage = total_w / sum(weights.get(s.name, 0.0) for s in active)
     fused_conf = float(np.clip(avg_conf * coverage, 0.0, 1.0))
 
+    normalised_weights = {k: round(v / total_w, 3) for k, v in w_eff.items()}
+
+    # Disagreement override — see docstring.
+    scores = [s.score for s in active]
+    disagreement = max(scores) - min(scores) if len(scores) >= 2 else 0.0
+    if disagreement > disagreement_threshold:
+        return FusedVerdict(
+            label="UNCERTAIN",
+            score=fused_score,
+            confidence=fused_conf * 0.5,
+            signals=signals,
+            weights=normalised_weights,
+        )
+
     lo, hi = uncertain_band
     if fused_score >= hi:
         label = "REAL"
@@ -478,7 +502,6 @@ def fuse_signals(
     else:
         label = "UNCERTAIN"
 
-    normalised_weights = {k: round(v / total_w, 3) for k, v in w_eff.items()}
     return FusedVerdict(
         label=label,
         score=fused_score,
