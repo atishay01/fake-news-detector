@@ -2,7 +2,7 @@
 
 A lightweight fake/real news classifier with a Streamlit dashboard. Paste a headline or article, get a prediction with confidence and the tokens that drove the decision.
 
-**Live demo:** _add your Streamlit Cloud URL after deployment_
+**Live demo:** <https://atishay-fake-news-detector.streamlit.app>
 **Author:** Atishay Jain
 
 ---
