@@ -79,16 +79,39 @@ def load_clip_bundle():
 # =============================================================================
 
 
+def _length_based_confidence(text: str, base: float) -> tuple[float, str]:
+    """Scale a text-model's confidence by input length.
+
+    Both classifiers were trained on full article bodies. Headline-only
+    or very short inputs are out-of-distribution — the model still returns
+    a confident-looking 100% score but it shouldn't dominate the fusion.
+    Lowering confidence lets metadata & image signals carry more weight.
+    """
+    n = len(text.split())
+    if n < 20:
+        return base * 0.1, f"headline-only ({n} words) — heavily downweighted"
+    if n < 50:
+        return base * 0.45, f"short text ({n} words) — partially downweighted"
+    if n < 100:
+        return base * 0.75, f"medium text ({n} words) — slightly downweighted"
+    return base, f"full article ({n} words) — full confidence"
+
+
 def text_signal_tfidf(pipe, text: str) -> mm.ModalitySignal:
     proba = pipe.predict_proba([text])[0]
     real_p = float(proba[1])
     label = "REAL" if real_p >= 0.5 else "FAKE"
+    conf, note = _length_based_confidence(text, base=0.9)
     return mm.ModalitySignal(
         name="text",
         score=real_p,
-        confidence=0.9,
+        confidence=conf,
         label=f"TF-IDF says {label} ({max(real_p, 1 - real_p):.1%})",
-        details={"real_probability": round(real_p, 4), "model": "tfidf_ensemble"},
+        details={
+            "real_probability": round(real_p, 4),
+            "model": "tfidf_ensemble",
+            "confidence_note": note,
+        },
     )
 
 
@@ -96,14 +119,19 @@ def text_signal_transformer(pipe, text: str) -> mm.ModalitySignal:
     r = pipe(text)[0]
     raw = r["label"].upper()
     is_real = raw in {"TRUE", "REAL", "LABEL_1"}
-    conf = float(r["score"])
-    real_p = conf if is_real else (1.0 - conf)
+    conf_raw = float(r["score"])
+    real_p = conf_raw if is_real else (1.0 - conf_raw)
+    conf, note = _length_based_confidence(text, base=0.95)
     return mm.ModalitySignal(
         name="text",
         score=real_p,
-        confidence=0.95,
-        label=f"RoBERTa says {'REAL' if is_real else 'FAKE'} ({conf:.1%})",
-        details={"real_probability": round(real_p, 4), "model": TRANSFORMER_MODEL},
+        confidence=conf,
+        label=f"RoBERTa says {'REAL' if is_real else 'FAKE'} ({conf_raw:.1%})",
+        details={
+            "real_probability": round(real_p, 4),
+            "model": TRANSFORMER_MODEL,
+            "confidence_note": note,
+        },
     )
 
 
@@ -362,6 +390,19 @@ if go:
             "URL field instead — the model classifies article text, not links."
         )
         st.stop()
+
+    # Headline-only warning. The text classifiers were trained on full
+    # article bodies, so one-line inputs are unreliable. The fusion layer
+    # downweights them automatically, but the user should know.
+    n_words = len(current_text.split()) if current_text else 0
+    if 0 < n_words < 40:
+        st.info(
+            f"ℹ️ Short text ({n_words} words). The text classifier was trained "
+            "on full articles — for headlines only, its confidence is "
+            "automatically reduced and the verdict leans more on metadata / "
+            "image signals. For best results, paste the full article body or "
+            "fetch it from the URL."
+        )
 
     # --- Run each modality the user selected --------------------------------
     signals = []
