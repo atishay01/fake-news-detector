@@ -1,6 +1,6 @@
-# Fake News Detector
+# Multimodal Fake News Detector
 
-A lightweight fake/real news classifier with a Streamlit dashboard. Paste a headline or article, get a prediction with confidence and the tokens that drove the decision.
+A **multimodal** fake/real news classifier with a Streamlit dashboard. Paste an article, optionally attach an image and a source URL — the system produces an explainable verdict by combining three independent signals: the article text, the image, and article metadata.
 
 **Live demo:** <https://atishay-fake-news-detector.streamlit.app>
 **Author:** Atishay Jain
@@ -9,18 +9,26 @@ A lightweight fake/real news classifier with a Streamlit dashboard. Paste a head
 
 ## What it does
 
-- Classifies English news text as **FAKE** or **REAL** with a probability score.
-- Surfaces the **top signal tokens** — the words whose TF-IDF × model weight pushed the decision the hardest. This makes the prediction auditable instead of a black box.
-- Ships with a reproducible training script and held-out test metrics.
+- Classifies English news as **FAKE / REAL / UNCERTAIN** using **three independent modalities**, then fuses them:
+  1. **Text** — RoBERTa transformer (default) or TF-IDF + soft-voting ensemble baseline.
+  2. **Image** — CLIP image↔text cosine similarity ("does the photo actually match the article?") plus lightweight image-origin forensics (EXIF, dimensions, format).
+  3. **Metadata** — clickbait markers, linguistic features (caps ratio, sentence length, named-entity density) and source-domain reputation from a hand-curated list of 50 outlets.
+- Uses **late fusion** — each modality is scored independently, then combined with a confidence-weighted average. The UI exposes per-modality scores and the exact weights used, so the final verdict is fully auditable.
+- Sidebar controls let the user **toggle modalities on/off** and **re-weight** them live — useful for demoing ablations.
+- Ships with a reproducible training script for the text baseline and held-out test metrics.
 
 ## Tech stack
 
 | Layer | Choice | Why |
 |---|---|---|
-| Features | TF-IDF (1-2 grams, 50K vocab, sublinear TF) | Fast, transparent, strong baseline on news text |
-| Model (baseline) | Soft-voting **ensemble** of Logistic Regression + MultinomialNB + ComplementNB | Real ensemble — LogReg gives calibrated probabilities + interpretable coefficients, NB variants add stability on word-count features |
-| Model (accurate) | Pre-trained RoBERTa (`hamzab/roberta-fake-news-classification`) | Strong OOD behaviour; user can toggle to this in the UI |
-| UI | Streamlit | Zero-boilerplate dashboard, free hosting |
+| Text features | TF-IDF (1-2 grams, 50K vocab, sublinear TF) | Fast, transparent, strong baseline on news text |
+| Text model (baseline) | Soft-voting **ensemble** of Logistic Regression + MultinomialNB + ComplementNB | Real ensemble — LogReg gives calibrated probabilities + interpretable coefficients, NB variants add stability on word-count features |
+| Text model (accurate) | Pre-trained RoBERTa (`hamzab/roberta-fake-news-classification`) | Strong OOD behaviour; user can toggle to this in the UI |
+| Image modality | CLIP `openai/clip-vit-base-patch32` zero-shot similarity | Catches decontextualised images — the classic "same photo reused for a different story" fake-news pattern |
+| Image forensics | Pillow (EXIF, dimensions, format) | Cheap origin heuristics — distinguishes wire photo from screenshot/meme |
+| Metadata module | Pure-Python heuristics + `data/source_credibility.json` | Fast, interpretable, no model to retrain |
+| Fusion | Confidence-weighted late fusion | Simpler and more interpretable than early fusion; each modality's contribution is visible |
+| UI | Streamlit (wide layout, tabs, sliders) | Zero-boilerplate dashboard, free hosting |
 | Hosting | Streamlit Community Cloud | Free, auto-deploys on `git push` |
 | Training data | `GonzaloA/fake_news` (HuggingFace) | Labeled English fake/real news, ~32K rows |
 
@@ -28,13 +36,15 @@ A lightweight fake/real news classifier with a Streamlit dashboard. Paste a head
 
 ```
 .
-├── app.py                 # Streamlit dashboard (3 input modes: text / URL / image)
-├── train.py               # Trains the model and saves artifacts
+├── app.py                 # Streamlit dashboard (multimodal input + fusion UI)
+├── multimodal.py          # CLIP image-text match, image forensics,
+│                          #   metadata heuristics, late-fusion layer
+├── train.py               # Trains the TF-IDF baseline and saves artifacts
 ├── requirements.txt       # Runtime deps (used by Streamlit Cloud)
 ├── requirements-train.txt # Training deps (datasets, matplotlib)
 ├── packages.txt           # System deps for Streamlit Cloud (tesseract-ocr)
 ├── models/
-│   └── fake_news_model.joblib   # Trained pipeline (created by train.py)
+│   └── fake_news_model.joblib   # Trained TF-IDF pipeline (created by train.py)
 ├── reports/
 │   ├── confusion_matrix.png     # Held-out confusion matrix
 │   └── metrics.txt              # Classification report + ROC-AUC
@@ -44,7 +54,8 @@ A lightweight fake/real news classifier with a Streamlit dashboard. Paste a head
 │   ├── project_report.pdf       # Full project report
 │   ├── presentation.pptx        # Project presentation
 │   └── bibtex.txt               # Citations
-└── data/                  # Local-only (gitignored); drop train.csv here to override HF
+└── data/
+    └── source_credibility.json  # Hand-curated domain reputation list (50 outlets)
 ```
 
 ## Quickstart (local)
@@ -65,6 +76,10 @@ streamlit run app.py
 ```
 
 The dashboard opens at `http://localhost:8501`.
+
+### Note on the live demo
+
+The CLIP image–text modality is **disabled by default** on the live Streamlit Cloud deployment because the combined footprint of RoBERTa (~500 MB) + CLIP (~600 MB) exceeds the free tier's ~1 GB memory limit. All other modalities (TF-IDF / RoBERTa text, image forensics, metadata) run unchanged. To exercise the full multimodal pipeline including CLIP, run the app locally with the command above, or toggle it on in the sidebar and accept that the hosted app may OOM. This is a deployment constraint, not a code constraint — on any instance with ≥ 2 GB RAM everything runs together.
 
 ## Deploy to the web (Streamlit Community Cloud — free)
 
@@ -125,11 +140,41 @@ Run `python train.py` and the metrics land in `reports/metrics.txt`. Typical num
 
 **Next iteration (roadmap step 1):** DistilBERT fine-tuned on a diverse mix (LIAR + FakeNewsNet + ISOT) to reduce the stylistic bias and raise OOD performance.
 
+## Multimodal architecture
+
+```
+                  ┌────────────────────┐
+  text  ────────► │ RoBERTa / TF-IDF   │ ──► text score + confidence
+                  └────────────────────┘
+                  ┌────────────────────┐
+  image ────────► │ CLIP text↔image    │ ──► semantic-match score
+                  │  cosine similarity │
+                  └────────────────────┘
+                  ┌────────────────────┐
+  image ────────► │ Pillow forensics   │ ──► origin score
+                  │  (EXIF / dim / fmt)│
+                  └────────────────────┘
+                  ┌────────────────────┐
+  text + url ───► │ Metadata heuristics│ ──► credibility score
+                  │  + source DB       │
+                  └────────────────────┘
+                              │
+                              ▼
+                 ┌────────────────────────┐
+                 │  confidence-weighted   │ ──►  REAL / FAKE / UNCERTAIN
+                 │    late fusion         │      + per-modality breakdown
+                 └────────────────────────┘
+```
+
+Each modality returns a `ModalitySignal(score, confidence, label, details)`. A signal with `confidence=0` (e.g. no image provided) is dropped from the fusion and the remaining weights are renormalised, so the system degrades gracefully when fewer modalities are available.
+
 ## Roadmap (good interview talking points)
 
+- [x] Add multimodal signals (image + metadata) and a late-fusion layer
+- [x] Expose per-modality scores in the UI for auditability
 - [ ] Evaluate on an out-of-distribution set (LIAR or FakeNewsNet) to quantify drift
-- [ ] Add a DistilBERT fine-tune as a second model, compare latency vs accuracy
-- [ ] Add a "why this prediction" LIME/SHAP panel alongside the current signal tokens
+- [ ] Replace heuristic metadata with a small learned model trained on labelled URL features
+- [ ] Add a "why this prediction" SHAP panel alongside the current TF-IDF signal tokens
 - [ ] Log predictions to SQLite so the dashboard can show a usage history
 
 ## License

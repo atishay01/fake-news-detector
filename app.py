@@ -1,10 +1,15 @@
-"""Streamlit dashboard for fake news detection.
+"""Streamlit dashboard for the *multimodal* fake-news detector.
 
-Two models:
-  - Accurate (RoBERTa, pre-trained on HuggingFace)  <-- default
-  - Fast (TF-IDF + Logistic Regression, trained by train.py)
+Three independent signals, fused late:
 
-Three input modes: Paste text · Fetch from URL · Upload image (OCR).
+    TEXT        - RoBERTa (default) or TF-IDF + Logistic-Regression baseline.
+    IMAGE       - CLIP image/text cosine similarity ("does the photo actually
+                  match the article?") + cheap image-origin forensics.
+    METADATA    - clickbait markers, linguistic features, URL-domain
+                  reputation. Pure Python, no model.
+
+A fusion layer combines whichever modalities the user supplied and reports
+a per-modality breakdown so the final verdict is explainable.
 
 Run locally:
     streamlit run app.py
@@ -14,24 +19,32 @@ from pathlib import Path
 
 import joblib
 import numpy as np
+import pandas as pd
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
+
+import multimodal as mm
 
 MODEL_PATH = Path(__file__).parent / "models" / "fake_news_model.joblib"
 TRANSFORMER_MODEL = "hamzab/roberta-fake-news-classification"
 
 st.set_page_config(
-    page_title="Fake News Detector",
+    page_title="Multimodal Fake News Detector",
     page_icon="📰",
-    layout="centered",
+    layout="wide",
 )
 
-st.title("Fake News Detector")
+st.title("Multimodal Fake News Detector")
 st.caption(
-    "RoBERTa transformer (default) · TF-IDF baseline (toggle) · "
-    "text / URL / image input"
+    "Text classifier (RoBERTa / TF-IDF) · CLIP image–text consistency · "
+    "metadata & source heuristics · late-fusion verdict"
 )
+
+
+# =============================================================================
+# Model loaders (cached)
+# =============================================================================
 
 
 @st.cache_resource(show_spinner="Loading TF-IDF baseline...")
@@ -56,27 +69,48 @@ def load_transformer():
     )
 
 
-def predict_tfidf(pipe, text: str):
+@st.cache_resource(show_spinner="Loading CLIP — first run downloads ~600 MB...")
+def load_clip_bundle():
+    return mm._load_clip()
+
+
+# =============================================================================
+# Text predictors → ModalitySignal
+# =============================================================================
+
+
+def text_signal_tfidf(pipe, text: str) -> mm.ModalitySignal:
     proba = pipe.predict_proba([text])[0]
-    pred = int(np.argmax(proba))
-    label = "REAL" if pred == 1 else "FAKE"
-    confidence = float(proba[pred])
-    return label, confidence
+    real_p = float(proba[1])
+    label = "REAL" if real_p >= 0.5 else "FAKE"
+    return mm.ModalitySignal(
+        name="text",
+        score=real_p,
+        confidence=0.9,
+        label=f"TF-IDF says {label} ({max(real_p, 1 - real_p):.1%})",
+        details={"real_probability": round(real_p, 4), "model": "tfidf_ensemble"},
+    )
 
 
-def predict_transformer(pipe, text: str):
+def text_signal_transformer(pipe, text: str) -> mm.ModalitySignal:
     r = pipe(text)[0]
     raw = r["label"].upper()
-    label = "REAL" if raw in {"TRUE", "REAL", "LABEL_1"} else "FAKE"
-    return label, float(r["score"])
+    is_real = raw in {"TRUE", "REAL", "LABEL_1"}
+    conf = float(r["score"])
+    real_p = conf if is_real else (1.0 - conf)
+    return mm.ModalitySignal(
+        name="text",
+        score=real_p,
+        confidence=0.95,
+        label=f"RoBERTa says {'REAL' if is_real else 'FAKE'} ({conf:.1%})",
+        details={"real_probability": round(real_p, 4), "model": TRANSFORMER_MODEL},
+    )
 
 
 def top_signal_tokens(pipe, text: str, k: int = 6):
-    """Interpret via the LR coefficients (works whether clf is LR or a VotingClassifier
-    containing LR)."""
+    """Interpret TF-IDF pipeline via its LR coefficients."""
     vec = pipe.named_steps["tfidf"]
     clf = pipe.named_steps["clf"]
-
     if hasattr(clf, "named_estimators_"):
         lr = clf.named_estimators_.get("lr")
         if lr is None or not hasattr(lr, "coef_"):
@@ -86,15 +120,19 @@ def top_signal_tokens(pipe, text: str, k: int = 6):
         coefs = clf.coef_[0]
     else:
         return []
-
     X = vec.transform([text])
     contribs = X.multiply(coefs).toarray().ravel()
-    feature_names = np.array(vec.get_feature_names_out())
+    names = np.array(vec.get_feature_names_out())
     nz = np.where(contribs != 0)[0]
     if len(nz) == 0:
         return []
     order = nz[np.argsort(np.abs(contribs[nz]))[::-1]][:k]
-    return [(feature_names[i], float(contribs[i])) for i in order]
+    return [(names[i], float(contribs[i])) for i in order]
+
+
+# =============================================================================
+# Content helpers (URL fetch + OCR autofill)
+# =============================================================================
 
 
 def fetch_article_text(url: str) -> str:
@@ -107,7 +145,8 @@ def fetch_article_text(url: str) -> str:
     resp = requests.get(url, headers=headers, timeout=15)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
-    for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "aside", "form"]):
+    for tag in soup(["script", "style", "noscript", "header", "footer",
+                     "nav", "aside", "form"]):
         tag.decompose()
     article = soup.find("article")
     container = article if article else soup
@@ -136,13 +175,8 @@ def clean_ocr_text(raw: str) -> str:
 
 
 def ocr_image(file_bytes: bytes) -> str:
-    try:
-        from PIL import Image
-        import pytesseract
-    except ImportError as e:
-        raise RuntimeError(
-            "OCR dependencies missing. Run: pip install pytesseract Pillow"
-        ) from e
+    from PIL import Image
+    import pytesseract
 
     win_path = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
     if win_path.exists():
@@ -157,180 +191,299 @@ def ocr_image(file_bytes: bytes) -> str:
             "https://github.com/UB-Mannheim/tesseract/wiki, "
             "then fully close and reopen the terminal running Streamlit."
         ) from e
-
     text = clean_ocr_text(raw).strip()
-    if len(text) < 80:
-        raise ValueError(
-            "OCR extracted mostly UI / chrome noise after cleanup. Tip: "
-            "crop your screenshot to just the article body (no taskbar, "
-            "browser tabs, clock or weather widgets), then try again."
-        )
     return text
 
 
-# -------------------- UI --------------------
+# =============================================================================
+# UI
+# =============================================================================
 
-if "main_text" not in st.session_state:
-    st.session_state.main_text = ""
 
-model_choice = st.radio(
-    "Model",
-    options=["Accurate (RoBERTa)", "Fast (TF-IDF baseline)"],
-    horizontal=True,
-    help=(
-        "RoBERTa generalises well to modern news. TF-IDF is a fast, interpretable "
-        "baseline I trained from scratch — it performs well on Reuters-style copy "
-        "but shows measurable out-of-distribution drift (see Model Card)."
-    ),
-)
+# --- Session state defaults --------------------------------------------------
+for key, default in [
+    ("main_text", ""),
+    ("article_url", ""),
+    ("image_bytes", None),
+    ("image_name", None),
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
 
-tab_text, tab_url, tab_img = st.tabs(["Paste text", "Fetch from URL", "Upload image"])
+# Streamlit forbids writing to a widget-bound key AFTER the widget is
+# instantiated. The URL-fetch and OCR buttons therefore stash their result
+# in `_pending_text`, call st.rerun(), and on the next run (before the
+# text_area widget is redrawn) we copy it into `main_text`.
+if "_pending_text" in st.session_state:
+    st.session_state["main_text"] = st.session_state.pop("_pending_text")
 
-with tab_text:
-    st.caption("Type or paste a news headline or article body into the text box below.")
 
-with tab_url:
-    url = st.text_input(
-        "Article URL",
-        placeholder="https://www.bbc.com/news/world-...",
-        key="url_input",
+# --- Sidebar -----------------------------------------------------------------
+with st.sidebar:
+    st.subheader("Model settings")
+    model_choice = st.radio(
+        "Text model",
+        options=["Accurate (RoBERTa)", "Fast (TF-IDF baseline)"],
+        help=(
+            "RoBERTa is the pre-trained transformer — strong on modern news.\n"
+            "TF-IDF is the interpretable baseline I trained from scratch."
+        ),
     )
-    if st.button("Fetch article", key="fetch_btn"):
-        if not url.strip():
-            st.warning("Please enter a URL.")
+
+    st.subheader("Modalities to use")
+    use_text = st.checkbox("📝 Text classifier", value=True)
+    use_image_match = st.checkbox(
+        "🖼️ CLIP image–text match",
+        value=False,
+        help=(
+            "Off by default on the free Streamlit Cloud tier because CLIP "
+            "is ~600 MB on top of RoBERTa's 500 MB and the combined footprint "
+            "can exceed the 1 GB memory limit. Turn on locally (or on a paid "
+            "tier) to activate the image-text semantic-match signal."
+        ),
+    )
+    use_image_forensics = st.checkbox("🔍 Image forensics", value=True)
+    use_metadata = st.checkbox("📊 Metadata & source", value=True)
+
+    st.caption(
+        "Uncheck a modality to see how the verdict changes without it — "
+        "useful when demo-ing ablation to an interviewer."
+    )
+
+    st.divider()
+    st.subheader("Fusion weights")
+    st.caption("Rebalance the late-fusion layer.")
+    w_text = st.slider("Text", 0.0, 1.0, 0.55, 0.05)
+    w_clip = st.slider("Image–text match", 0.0, 1.0, 0.20, 0.05)
+    w_forensics = st.slider("Image forensics", 0.0, 1.0, 0.05, 0.05)
+    w_metadata = st.slider("Metadata", 0.0, 1.0, 0.20, 0.05)
+
+
+# --- Main input panel --------------------------------------------------------
+left, right = st.columns([3, 2])
+
+with left:
+    st.subheader("1. Article text")
+    st.caption(
+        "Paste directly, or populate from a URL / image on the right."
+    )
+    st.text_area(
+        "Article text",
+        height=300,
+        placeholder="Paste article text here...",
+        key="main_text",
+        label_visibility="collapsed",
+    )
+
+with right:
+    st.subheader("2. Optional: URL")
+    url_in = st.text_input(
+        "Article URL (used for source-credibility score + fetch)",
+        placeholder="https://www.bbc.com/news/...",
+        key="article_url",
+    )
+    if st.button("Fetch article body", use_container_width=True):
+        if not url_in.strip():
+            st.warning("Enter a URL first.")
         else:
             try:
                 with st.spinner("Fetching..."):
-                    fetched = fetch_article_text(url.strip())
-                st.session_state.main_text = fetched
-                st.success(
-                    f"Fetched {len(fetched):,} characters. "
-                    "Scroll down to review, then click Check."
-                )
+                    fetched = fetch_article_text(url_in.strip())
+                # Stash, then rerun — the top-of-script handler copies
+                # _pending_text into main_text before the widget redraws.
+                st.session_state["_pending_text"] = fetched
+                st.success(f"Fetched {len(fetched):,} characters.")
                 st.rerun()
             except Exception as e:
                 st.error(f"Fetch failed: {e}")
 
-with tab_img:
+    st.subheader("3. Optional: image")
     uploaded = st.file_uploader(
-        "Upload a news image (screenshot, photo of an article, etc.)",
+        "Image that accompanies the article",
         type=["png", "jpg", "jpeg", "webp"],
-        key="img_uploader",
+        label_visibility="collapsed",
     )
     if uploaded is not None:
+        st.session_state.image_bytes = uploaded.getvalue()
+        st.session_state.image_name = uploaded.name
         st.image(uploaded, caption=uploaded.name, use_container_width=True)
-        if st.button("Extract text with OCR", key="ocr_btn"):
+        if st.button("Also OCR this image into the text box", use_container_width=True):
             try:
                 with st.spinner("Running OCR..."):
-                    extracted = ocr_image(uploaded.getvalue())
-                st.session_state.main_text = extracted
-                st.success(
-                    f"Extracted {len(extracted):,} characters. "
-                    "Scroll down to review, then click Check."
-                )
-                st.rerun()
+                    extracted = ocr_image(st.session_state.image_bytes)
+                if len(extracted) < 40:
+                    st.warning(
+                        "OCR extracted very little text. The image will still "
+                        "be analysed for image–text match and forensics."
+                    )
+                else:
+                    st.session_state["_pending_text"] = extracted
+                    st.success(f"Extracted {len(extracted):,} characters.")
+                    st.rerun()
             except Exception as e:
                 st.error(f"OCR failed: {e}")
+    elif st.session_state.image_bytes is not None:
+        st.image(
+            st.session_state.image_bytes,
+            caption=st.session_state.image_name or "(previous upload)",
+            use_container_width=True,
+        )
+        if st.button("Clear image"):
+            st.session_state.image_bytes = None
+            st.session_state.image_name = None
+            st.rerun()
+
 
 st.divider()
+go = st.button("🔎 Analyze (multimodal)", type="primary", use_container_width=True)
 
-text = st.text_area(
-    "News article text:",
-    height=240,
-    placeholder=(
-        "Paste article text here, or use the 'Fetch from URL' / 'Upload image' "
-        "tabs above to populate this automatically."
-    ),
-    key="main_text",
-)
 
-go = st.button("Check", type="primary")
+# =============================================================================
+# Analysis
+# =============================================================================
+
 
 if go:
-    current = (text or "").strip()
-    if not current:
-        st.warning("Please enter some text, fetch a URL, or upload an image first.")
-        st.stop()
+    current_text = (st.session_state.main_text or "").strip()
+    current_url = (st.session_state.article_url or "").strip() or None
+    current_image = st.session_state.image_bytes
 
-    if current.startswith(("http://", "https://")) and "\n" not in current:
+    if not current_text and current_image is None:
         st.warning(
-            "This looks like a bare URL. Use the 'Fetch from URL' tab above — "
-            "the model classifies article text, not links."
+            "Please provide at least some text (paste, fetch from URL, or OCR "
+            "an image) OR an image to analyse."
         )
         st.stop()
 
+    if (current_text.startswith(("http://", "https://"))
+            and "\n" not in current_text):
+        st.warning(
+            "This looks like a bare URL pasted into the text box. Use the "
+            "URL field instead — the model classifies article text, not links."
+        )
+        st.stop()
+
+    # --- Run each modality the user selected --------------------------------
+    signals = []
+
+    # 1. Text
     using_transformer = model_choice.startswith("Accurate")
+    token_signals = []
+    if use_text and current_text:
+        with st.spinner("Scoring text..."):
+            if using_transformer:
+                sig = text_signal_transformer(load_transformer(), current_text)
+            else:
+                pipe = load_tfidf()
+                sig = text_signal_tfidf(pipe, current_text)
+                token_signals = top_signal_tokens(pipe, current_text)
+        signals.append(sig)
 
-    if using_transformer:
-        pipe = load_transformer()
-        label, confidence = predict_transformer(pipe, current)
-        signals = []
-    else:
-        pipe = load_tfidf()
-        label, confidence = predict_tfidf(pipe, current)
-        signals = top_signal_tokens(pipe, current)
+    # 2a. CLIP image–text match
+    if use_image_match and current_image is not None and current_text:
+        with st.spinner("Running CLIP image–text match..."):
+            try:
+                clip_bundle = load_clip_bundle()
+                sig = mm.analyze_image_text_match(
+                    current_image, current_text, clip_bundle=clip_bundle
+                )
+                signals.append(sig)
+            except Exception as e:
+                st.warning(f"CLIP modality failed, skipping: {e}")
 
-    UNCERTAIN_THRESHOLD = 0.70
+    # 2b. Image forensics
+    if use_image_forensics and current_image is not None:
+        sig = mm.analyze_image_forensics(current_image)
+        signals.append(sig)
 
-    if confidence < UNCERTAIN_THRESHOLD:
-        st.warning(
-            f"Prediction: **UNCERTAIN**  ·  leaning {label}, confidence {confidence:.1%}\n\n"
-            "The model is not confident enough to commit. See the **Model Card** below "
-            "for known limitations."
-        )
-    elif label == "REAL":
-        st.success(f"Prediction: **REAL**   ·   confidence {confidence:.1%}")
-    else:
-        st.error(f"Prediction: **FAKE**   ·   confidence {confidence:.1%}")
-    st.progress(confidence)
+    # 3. Metadata
+    if use_metadata and current_text:
+        sig = mm.analyze_metadata(current_text, url=current_url)
+        signals.append(sig)
 
-    st.caption(f"Model used: `{TRANSFORMER_MODEL}`" if using_transformer
-               else "Model used: TF-IDF + Logistic Regression (trained from scratch)")
+    if not signals:
+        st.warning("No modalities produced a usable signal. Check your inputs.")
+        st.stop()
 
-    if signals:
-        st.subheader("Top signal tokens (TF-IDF baseline only)")
-        for token, weight in signals:
-            direction = "-> REAL" if weight > 0 else "-> FAKE"
-            st.write(f"`{token}`  {direction}  (weight {weight:+.3f})")
+    # --- Fuse ---------------------------------------------------------------
+    weights = {
+        "text": w_text,
+        "image_text_match": w_clip,
+        "image_forensics": w_forensics,
+        "metadata": w_metadata,
+    }
+    verdict = mm.fuse_signals(signals, weights=weights)
 
-    with st.expander("How this works"):
+    # -----------------------------------------------------------------------
+    # Result panel  (minimalist: verdict + per-modality table, rest collapsed)
+    # -----------------------------------------------------------------------
+    st.divider()
+
+    v_col1, v_col2 = st.columns([1, 2])
+    with v_col1:
+        if verdict.label == "REAL":
+            st.success(f"### {verdict.label}")
+        elif verdict.label == "FAKE":
+            st.error(f"### {verdict.label}")
+        else:
+            st.warning(f"### {verdict.label}")
+    with v_col2:
+        st.metric("Fused REAL-probability", f"{verdict.score:.1%}",
+                  help=f"Fusion confidence: {verdict.confidence:.1%}")
+        st.progress(verdict.score)
+
+    # Per-modality breakdown — one compact table, no duplicate chart.
+    rows = []
+    for s in verdict.signals:
+        rows.append({
+            "Modality": s.name,
+            "REAL-score": round(s.score, 3) if s.confidence > 0 else "—",
+            "Weight": verdict.weights.get(s.name, 0.0),
+            "Verdict": s.label,
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # Drill-down + methodology hidden behind a single collapsed expander
+    # so interviewers who want depth can click, and casual viewers don't
+    # have to scroll past a wall of text.
+    with st.expander("Show reasoning & methodology"):
+        for s in verdict.signals:
+            tag = "" if s.confidence > 0 else "  _(not used)_"
+            st.markdown(f"**`{s.name}` → {s.label}**{tag}")
+            if s.details:
+                for k, v in s.details.items():
+                    if isinstance(v, list):
+                        st.markdown(f"- *{k}:* " + "; ".join(str(x) for x in v))
+                    else:
+                        st.markdown(f"- *{k}:* {v}")
+            if s.name == "text" and token_signals:
+                toks = ", ".join(
+                    f"`{t}` ({'+' if w > 0 else ''}{w:.2f})" for t, w in token_signals
+                )
+                st.markdown(f"- *top TF-IDF tokens:* {toks}")
+            st.write("")
+
+        st.markdown("---")
         st.markdown(
-            "**Two-model setup:**\n\n"
-            "- **RoBERTa** (accurate): a pre-trained transformer from HuggingFace "
-            f"(`{TRANSFORMER_MODEL}`). Strong out-of-distribution behaviour because it "
-            "learned semantic representations from a much larger corpus.\n"
-            "- **TF-IDF + Logistic Regression** (fast): trained from scratch on "
-            "`GonzaloA/fake_news`. Interpretable — the *signal tokens* show which "
-            "words pushed the decision.\n\n"
-            "Held-out metrics for the TF-IDF baseline: 98% accuracy, ROC-AUC 0.9971 "
-            "(see `reports/metrics.txt`)."
+            "**How fusion works.** Each modality outputs a REAL-score and "
+            "confidence; the final score is a confidence-weighted average "
+            "using the sidebar weights. Modalities without input drop out and "
+            "remaining weights renormalise. Score ≥ 0.6 → REAL, ≤ 0.4 → FAKE, "
+            "otherwise UNCERTAIN. This is **late fusion** — each signal is "
+            "scored independently and combined, so every contribution is "
+            "auditable."
+        )
+        st.markdown(
+            f"**Models.** Text: `{TRANSFORMER_MODEL}` or TF-IDF ensemble "
+            "(LogReg + MultinomialNB + ComplementNB), 96% held-out accuracy on "
+            "`GonzaloA/fake_news`. Image: CLIP `openai/clip-vit-base-patch32` "
+            "for text-image similarity + Pillow heuristics for origin. "
+            "Metadata: pure-Python heuristics + 50-domain credibility list."
         )
 
-    with st.expander("Model Card — honest evaluation"):
-        st.markdown(
-            "**Baseline:** TF-IDF + soft-voting ensemble of LogReg + MultinomialNB + "
-            "ComplementNB. Test accuracy 96%, ROC-AUC 0.994.\n\n"
-            "**Measured out-of-distribution behaviour** (real samples through both models):\n\n"
-            "| Input style | Ensemble says | RoBERTa says |\n"
-            "|---|---|---|\n"
-            "| Reuters-style US wire copy | REAL 99.4% | REAL 100% |\n"
-            "| Modern Indian / BBC / AP-captioned | REAL 72.9% | REAL 100% |\n"
-            "| Peer-reviewed science news | REAL 63.5% | REAL 100% |\n"
-            "| Classic clickbait | FAKE 96.2% | FAKE 100% |\n\n"
-            "**Why the ensemble helps:** LogReg alone fit the Reuters-dominated REAL "
-            "class closely and drifted on modern news. Adding MultinomialNB + "
-            "ComplementNB shifts the aggregated probability away from single-model "
-            "stylistic overfit.\n\n"
-            "**Why RoBERTa does even better:** pre-trained on a much larger, more "
-            "diverse corpus, so it latches onto semantic content rather than surface "
-            "style.\n\n"
-            "**UNCERTAIN band:** predictions below 70% confidence are shown as "
-            "UNCERTAIN rather than forcing a FAKE / REAL call."
-        )
 
 st.divider()
 st.caption(
-    "Limitations: English news only. May misclassify satire, opinion pieces, or "
-    "topics far outside both models' training distributions. OCR quality depends "
-    "on image clarity. Treat predictions as a signal, not a verdict."
+    "Multimodal fake-news detection · text + image + metadata · "
+    "late-fusion · GitHub: atishay01/fake-news-detector"
 )
