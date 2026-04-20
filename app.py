@@ -467,7 +467,49 @@ if go:
         elif verdict.label == "FAKE":
             st.error(f"### {verdict.label}")
         else:
-            st.warning(f"### {verdict.label}")
+            # UNCERTAIN — explain *why* instead of just showing a neutral banner.
+            active = [s for s in verdict.signals if s.confidence > 0]
+            scores = [s.score for s in active]
+            spread = (max(scores) - min(scores)) if len(scores) >= 2 else 0.0
+
+            if spread > 0.5:
+                # Identify the two outlier modalities for a concrete reason.
+                hi = max(active, key=lambda s: s.score)
+                lo = min(active, key=lambda s: s.score)
+                reason = (
+                    f"Modalities disagreed by {spread:.2f} (threshold 0.5): "
+                    f"`{hi.name}` at {hi.score:.2f} vs `{lo.name}` at "
+                    f"{lo.score:.2f}. Verdict forced to UNCERTAIN — "
+                    f"the system refuses to commit when its own signals "
+                    f"contradict each other."
+                )
+                tooltip = (
+                    f"Modalities disagreed by {spread:.2f} (threshold 0.5) — "
+                    f"verdict forced to UNCERTAIN for honesty."
+                )
+            else:
+                reason = (
+                    f"Fused score {verdict.score:.2f} fell inside the "
+                    f"uncertain band (0.40–0.60). No single signal is "
+                    f"strong enough to commit."
+                )
+                tooltip = "Score in the uncertain band (0.40–0.60)."
+
+            st.markdown(
+                f"""
+                <div title="{tooltip}" style="
+                    background-color: #fff4e5;
+                    border-left: 6px solid #ff9800;
+                    padding: 0.8rem 1rem;
+                    border-radius: 0.4rem;
+                    margin-bottom: 0.25rem;
+                ">
+                    <h3 style="margin: 0; color: #b36b00;">⚠️ UNCERTAIN</h3>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.caption(f"ℹ️ {reason}")
     with v_col2:
         st.metric("Fused REAL-probability", f"{verdict.score:.1%}",
                   help=f"Fusion confidence: {verdict.confidence:.1%}")
