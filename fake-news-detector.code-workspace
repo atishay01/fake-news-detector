@@ -1,0 +1,13 @@
+{
+    "folders": [
+        { "path": "." }
+    ],
+    "settings": {
+        "window.title": "Fake News Detector — ${activeEditorShort}",
+        "files.exclude": {
+            "**/__pycache__": true,
+            "**/.ipynb_checkpoints": true,
+            "**/.pytest_cache": true
+        }
+    }
+}

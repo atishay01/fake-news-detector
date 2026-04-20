@@ -1,0 +1,84 @@
+@article{elmogy2021fake,
+  title={Fake reviews detection using supervised machine learning},
+  author={Elmogy, Ahmed M and Tariq, Usman and Ammar, Mohammed and Ibrahim, Atef},
+  journal={International Journal of Advanced Computer Science and Applications},
+  volume={12},
+  number={1},
+  year={2021},
+  publisher={Science and Information (SAI) Organization Limited}
+}
+@article{budhi2021resampling,
+  title={Resampling imbalanced data to detect fake reviews using machine learning classifiers and textual-based features},
+  author={Budhi, Gregorius Satia and Chiong, Raymond and Wang, Zuli},
+  journal={Multimedia Tools and Applications},
+  volume={80},
+  pages={13079--13097},
+  year={2021},
+  publisher={Springer}
+}
+@article{le2020detection,
+  title={Detection of fake reviews on social media using machine learning algorithms},
+  author={Le, Huy and Kim, Ben},
+  journal={Issues in Information Systems},
+  volume={21},
+  number={1},
+  pages={185--194},
+  year={2020}
+}
+@article{alsubari2022data,
+  title={Data analytics for the identification of fake reviews using supervised learning},
+  author={Alsubari, S Nagi and Deshmukh, Sachin N and Alqarni, A Abdullah and Alsharif, Nizar and Aldhyani, TH and Alsaade, Fawaz Waselallah and Khalaf, Osamah I},
+  journal={Computers, Materials \& Continua},
+  volume={70},
+  number={2},
+  pages={3189--3204},
+  year={2022}
+}
+@article{kumar2019fake,
+  title={Fake review detection in big data using parallel bbo},
+  author={Kumar Tripathi, Ashish and Sharma, Kapil and Bala, Manju},
+  journal={International Journal of Information Systems \& Management Science},
+  volume={2},
+  number={2},
+  year={2019}
+}
+@article{rustagi2022fake,
+  title={Fake review detection using machine learning},
+  author={Rustagi, Aaryan and Padisetti, Vajraang and Subramaniam, Suresh},
+  journal={Journal of Student Research},
+  volume={11},
+  number={1},
+  year={2022}
+}
+@article{yao2021ensemble,
+  title={An ensemble model for fake online review detection based on data resampling, feature pruning, and parameter optimization},
+  author={Yao, Jianrong and Zheng, Yuan and Jiang, Hui},
+  journal={Ieee Access},
+  volume={9},
+  pages={16914--16927},
+  year={2021},
+  publisher={Ieee}
+}
+@article{salminen2022creating,
+  title={Creating and detecting fake reviews of online products},
+  author={Salminen, Joni and Kandpal, Chandrashekhar and Kamel, Ahmed Mohamed and Jung, Soon-gyo and Jansen, Bernard J},
+  journal={Journal of Retailing and Consumer Services},
+  volume={64},
+  pages={102771},
+  year={2022},
+  publisher={Elsevier}
+}
+@article{mukherjee2013fake,
+  title={Fake review detection: Classification and analysis of real and pseudo reviews},
+  author={Mukherjee, Arjun and Venkataraman, Vivek and Liu, Bing and Glance, Natalie and others},
+  journal={UIC-CS-03-2013. Technical Report},
+  year={2013}
+}
+@article{asaad2023fake,
+  title={Fake Review Detection Using Machine Learning.},
+  author={Asaad, Wesam Hameed and Allami, Ragheed and Ali, Yossra Hussain},
+  journal={Revue d'Intelligence Artificielle},
+  volume={37},
+  number={5},
+  year={2023}
+}

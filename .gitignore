@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+.env
+.DS_Store
+.ipynb_checkpoints/
+.claude/
+
+# Raw / downloaded data — do not commit large CSVs
+data/*.csv
+!data/.gitkeep
+
+# PRIVATE — interview prep notes. Never push to a public repo.
+Interview_Preparation_Wink.md
+
+# Keep the trained model in the repo so Streamlit Cloud can serve it without
+# re-training on every cold start. Remove the leading `#` to exclude instead.
+# models/*.joblib
