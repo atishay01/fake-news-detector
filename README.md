@@ -108,7 +108,7 @@ Colab is great for exploration and one-off training, but it is a poor choice for
 
 ## Results
 
-Run `python train.py` and the metrics land in `reports/metrics.txt`. Typical numbers on this dataset:
+Run `python train.py` and the metrics land in `reports/metrics.txt`. Typical numbers for the TF-IDF + soft-voting text baseline on this dataset (the fused RoBERTa + CLIP system is not benchmarked here):
 
 | Metric | Value |
 |---|---|
